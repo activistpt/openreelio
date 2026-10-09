@@ -801,6 +801,13 @@ fn ensure_no_existing_symlink_components(path: &Path, label: &str) -> Result<(),
     let mut current = PathBuf::new();
     for component in path.components() {
         current.push(component.as_os_str());
+        // A prefix (`\?\C:`) and a root can never be symlinks, and Win32 refuses to
+        // inspect the bare verbatim prefix, so only normal segments are stat'ed.
+        // Without this, every canonicalized (verbatim) Windows path fails here with
+        // "Failed to inspect {label} component \?\C:" before any file is written.
+        if matches!(component, std::path::Component::Prefix(_) | std::path::Component::RootDir) {
+            continue;
+        }
         match std::fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err(format!(
@@ -1174,6 +1181,19 @@ fn atomic_replace(dest: &Path, src_tmp: &Path) -> CoreResult<()> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// Windows: `std::fs::canonicalize` returns a verbatim path (`\?\C:\...`).
+    /// Walking its components must not try to stat the bare prefix, or every
+    /// scoped output path (workspace import, exports) is rejected with
+    /// "Failed to inspect ... component \?\C:" before touching the filesystem.
+    #[cfg(windows)]
+    #[test]
+    fn ensure_no_existing_symlink_components_accepts_canonical_verbatim_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(dir.path()).unwrap();
+        ensure_no_existing_symlink_components(&canonical, "test path")
+            .expect("canonical verbatim path must be inspectable");
+    }
 
     #[test]
     fn atomic_write_bytes_creates_and_replaces() {
